@@ -30,6 +30,7 @@ from generators import (
     paloalto,
     web_app,
     auth_alerts,
+    edr_ransomware,
 )
 
 OUTPUT_DIR = Path(__file__).parent / "output"
@@ -43,23 +44,27 @@ def banner(title: str) -> None:
 def run_all(count: int) -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    banner("1/6  Active Directory  (XML Windows Events)")
+    banner("1/7  Active Directory  (XML Windows Events)")
     active_directory.generate(OUTPUT_DIR / "active_directory.xml", count=count)
 
-    banner("2/6  Microsoft SQL Server  (audit log)")
+    banner("2/7  Microsoft SQL Server  (audit log)")
     mssql_db.generate(OUTPUT_DIR / "mssql_audit.log", count=count)
 
-    banner("3/6  MySQL  (general + error log)")
+    banner("3/7  MySQL  (general + error log)")
     mysql_db.generate(OUTPUT_DIR / "mysql.log", count=count)
 
-    banner("4/6  Palo Alto Networks  (CSV: TRAFFIC + THREAT + URL)")
+    banner("4/7  Palo Alto Networks  (CSV: TRAFFIC + THREAT + URL)")
     paloalto.generate(OUTPUT_DIR / "paloalto.csv", count=count)
 
-    banner("5/6  Web Application  (Apache combined log)")
+    banner("5/7  Web Application  (Apache combined log)")
     web_app.generate(OUTPUT_DIR / "web_access.log", count=count)
 
-    banner("6/6  Authentication Alerts  (syslog auth.log)")
+    banner("6/7  Authentication Alerts  (syslog auth.log)")
     auth_alerts.generate(OUTPUT_DIR / "auth.log", count=count)
+
+    banner("7/7  EDR / Ransomware  (FIM + Sysmon + VirusTotal + AR)")
+    # For EDR, count = number of ransomware infection scenarios (default 2)
+    edr_ransomware.generate(OUTPUT_DIR / "edr_ransomware.json", count=max(2, count // 20))
 
     banner("DONE")
     print(f"\nAll log files written to: {OUTPUT_DIR}\n")
@@ -75,6 +80,7 @@ SOURCE_MAP = {
     "paloalto":   (paloalto,         "paloalto.csv"),
     "web":        (web_app,          "web_access.log"),
     "auth":       (auth_alerts,      "auth.log"),
+    "edr":        (edr_ransomware,   "edr_ransomware.json"),
 }
 
 
