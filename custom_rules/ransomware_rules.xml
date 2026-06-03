@@ -1,0 +1,173 @@
+<!--
+  Wazuh custom rules - EDR / Ransomware detection
+  ================================================
+
+  Source events: generators/edr_ransomware.py  ->  edr_ransomware.json
+  Agent ingestion:
+      <localfile>
+        <log_format>json</log_format>
+        <location>/var/log/wazuh-test/edr_ransomware.json</location>
+      </localfile>
+
+  These rules elevate the raw FIM / Sysmon process-create / VirusTotal
+  events emitted by the generator into dashboard-visible ransomware
+  alerts. Without them, events land in wazuh-archives-* only and never
+  appear in wazuh-alerts-*.
+
+  Deploy on the Wazuh MANAGER (10.1.244.10):
+
+      cp custom_rules/ransomware_rules.xml /var/ossec/etc/rules/
+      chown wazuh:wazuh /var/ossec/etc/rules/ransomware_rules.xml
+      chmod 660            /var/ossec/etc/rules/ransomware_rules.xml
+      systemctl restart wazuh-manager
+
+  Verify a single line on the manager:
+      sed -n '1p' /var/log/wazuh-test/edr_ransomware.json \
+        | /var/ossec/bin/wazuh-logtest
+
+  Rule ID range used: 100100 - 100131 (custom user range).
+-->
+
+<group name="ransomware,wazuh_log_generator,">
+
+  <!-- ================================================================
+       T1490 - Inhibit System Recovery
+       Process creations that destroy backups / shadow copies / recovery
+       ================================================================ -->
+
+  <rule id="100100" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)vssadmin(\.exe)?\s+(?:[^\s]+\s+)?Delete\s+Shadows</field>
+    <description>EDR Ransomware: Volume Shadow Copies deleted via vssadmin (T1490)</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>inhibit_recovery,attack,</group>
+  </rule>
+
+  <rule id="100101" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)wbadmin(\.exe)?\s+delete\s+catalog</field>
+    <description>EDR Ransomware: Windows backup catalog deleted via wbadmin (T1490)</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>inhibit_recovery,attack,</group>
+  </rule>
+
+  <rule id="100102" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)bcdedit(\.exe)?.+recoveryenabled\s+No</field>
+    <description>EDR Ransomware: Windows recovery mode disabled via bcdedit (T1490)</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>inhibit_recovery,attack,</group>
+  </rule>
+
+  <rule id="100103" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)wmic(\.exe)?\s+shadowcopy\s+delete</field>
+    <description>EDR Ransomware: Shadow copies deleted via WMIC (T1490)</description>
+    <mitre>
+      <id>T1490</id>
+    </mitre>
+    <group>inhibit_recovery,attack,</group>
+  </rule>
+
+  <!-- ================================================================
+       T1562 / T1070 - Impair Defenses / Indicator Removal
+       Disable Defender, disable firewall, clear event logs
+       ================================================================ -->
+
+  <rule id="100110" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)reg(\.exe)?.+Windows\s+Defender.+DisableAntiSpyware</field>
+    <description>EDR Ransomware: Windows Defender disabled via registry (T1562.001)</description>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+    <group>defense_evasion,attack,</group>
+  </rule>
+
+  <rule id="100111" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)netsh(\.exe)?\s+advfirewall.+state\s+off</field>
+    <description>EDR Ransomware: Windows Firewall disabled via netsh (T1562.004)</description>
+    <mitre>
+      <id>T1562.004</id>
+    </mitre>
+    <group>defense_evasion,attack,</group>
+  </rule>
+
+  <rule id="100112" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="data.win.eventdata.commandLine" type="pcre2">(?i)wevtutil(\.exe)?\s+cl\s+(Security|System|Application)</field>
+    <description>EDR Ransomware: Windows event log cleared via wevtutil (T1070.001)</description>
+    <mitre>
+      <id>T1070.001</id>
+    </mitre>
+    <group>defense_evasion,attack,</group>
+  </rule>
+
+  <!-- ================================================================
+       T1486 - Data Encrypted for Impact
+       Files renamed with known ransomware extensions
+       (LockBit / BlackCat / Conti / Mamona + common families)
+       ================================================================ -->
+
+  <rule id="100120" level="13">
+    <decoded_as>json</decoded_as>
+    <field name="syscheck.path" type="pcre2">(?i)\.(lockbit|bc7e|conti|HAes|locked|encrypted|crypted|crypt|crypto|ryk|ryuk|locky|wcry|wnry|wncry|onion|cerber|sage|cuba|revil|sodinokibi|maze|netwalker|darkside|babuk|hive|blackcat|alphv)$</field>
+    <description>EDR Ransomware: File renamed with known ransomware extension - $(syscheck.path) (T1486)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>impact,attack,file_encrypted,</group>
+  </rule>
+
+  <!-- Ransom note dropped: README.HAes.txt / Restore-My-Files.txt /
+       RECOVER-FILES.txt / readme.txt (in user folders) -->
+  <rule id="100121" level="13">
+    <decoded_as>json</decoded_as>
+    <field name="syscheck.event">added</field>
+    <field name="syscheck.path" type="pcre2">(?i)[\\/](README|RECOVER|RESTORE|HOW.?TO.?DECRYPT|DECRYPT.?INSTRUCTION|YOUR.?FILES|Restore.?My.?Files|RECOVER.?FILES)[^\\/]*\.(txt|html|hta)$</field>
+    <description>EDR Ransomware: Ransom note dropped - $(syscheck.path) (T1486)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>impact,attack,ransom_note,</group>
+  </rule>
+
+  <!-- ================================================================
+       Correlation - escalate on multiple indicators / mass encryption
+       ================================================================ -->
+
+  <!-- Mass file-encryption: 8+ encrypted-extension files within 60s on
+       the same agent (matches the FIM "added" burst from the generator) -->
+  <rule id="100130" level="14" frequency="8" timeframe="60">
+    <if_matched_sid>100120</if_matched_sid>
+    <same_field>agent.id</same_field>
+    <description>EDR Ransomware: Mass file-encryption burst on $(agent.name) - 8+ files renamed with ransomware extensions in 60s (T1486)</description>
+    <mitre>
+      <id>T1486</id>
+    </mitre>
+    <group>impact,attack,correlation,</group>
+  </rule>
+
+  <!-- Confirmed ransomware: recovery inhibition AND file encryption
+       observed on the same agent within 5 minutes -->
+  <rule id="100131" level="15">
+    <if_matched_group>file_encrypted</if_matched_group>
+    <if_sid>100100,100101,100102,100103</if_sid>
+    <same_field>agent.id</same_field>
+    <timeframe>300</timeframe>
+    <description>EDR RANSOMWARE CONFIRMED on $(agent.name): recovery inhibition + file encryption within 5 minutes (T1486 + T1490)</description>
+    <mitre>
+      <id>T1486</id>
+      <id>T1490</id>
+    </mitre>
+    <group>impact,attack,correlation,confirmed_ransomware,</group>
+  </rule>
+
+</group>

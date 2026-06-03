@@ -225,7 +225,11 @@ PRIV_USERS = sorted(set(PRIV_USERS))
 
 
 # =========================================================================
+<<<<<<< HEAD
 # HOSTS — banking infrastructure naming, generic OS
+=======
+# HOSTS â€” banking infrastructure naming, generic OS
+>>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 # =========================================================================
 HOSTS = [
     # Domain controllers
@@ -262,7 +266,11 @@ DOMAINS = ["BANK", "CORP", "BANK.LOCAL"]
 
 
 # =========================================================================
+<<<<<<< HEAD
 # DATABASES — used by MSSQL and MySQL generators
+=======
+# DATABASES â€” used by MSSQL and MySQL generators
+>>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 # =========================================================================
 DATABASES_BANKING = [
     "CORE_BANKING",      # accounts, balances, transactions
@@ -285,7 +293,11 @@ DATABASES_SENSITIVE = ["CORE_BANKING", "CARDS_PROD", "PAYMENTS",
 # =========================================================================
 # NETWORK POOLS
 # =========================================================================
+<<<<<<< HEAD
 # Internal LAN — corporate workstations
+=======
+# Internal LAN â€” corporate workstations
+>>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 INTERNAL_IPS = [
     "10.10.1.15", "10.10.1.22", "10.10.2.50", "10.10.3.101",
     "10.11.0.45", "10.12.0.77", "10.13.0.120",
@@ -304,7 +316,11 @@ VPN_IPS = [f"10.70.0.{i}" for i in range(10, 60)]
 # Branch office NAT egress
 BRANCH_IPS = ["10.80.1.1", "10.80.2.1", "10.80.3.1"]
 
+<<<<<<< HEAD
 # External — known-bad / suspect
+=======
+# External â€” known-bad / suspect
+>>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 EXTERNAL_IPS = [
     "185.220.101.45",   # TOR exit
     "185.220.102.8",    # TOR exit
@@ -414,4 +430,8 @@ def pick_any_user() -> dict:
 def pick_user_by_role(role: str) -> dict:
     """Find any user with a given role; falls back to random if none."""
     matches = [u for u in POPULATION if u["role"] == role]
+<<<<<<< HEAD
     return random.choice(matches) if matches else pick_any_user()
+=======
+    return random.choice(matches) if matches else pick_any_user()
+>>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
