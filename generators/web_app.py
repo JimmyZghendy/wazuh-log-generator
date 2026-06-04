@@ -280,8 +280,4 @@ def generate(path: Path, count: int = 40) -> None:
 
     print(f"  wrote {len(events)} web access events -> {path.name}")
     print(f"  scenario-driven web brute-force chains: {len(INCIDENTS)} "
-<<<<<<< HEAD
           f"(attackers: {[i['attacker_ip'] for i in INCIDENTS]})")
-=======
-          f"(attackers: {[i['attacker_ip'] for i in INCIDENTS]})")
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
