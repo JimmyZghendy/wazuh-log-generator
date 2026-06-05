@@ -1,5 +1,4 @@
 """
-<<<<<<< HEAD
 Palo Alto Networks log generator (enhanced, PAN-OS 10.x).
 
 Mirrors the EDR generator's per-incident scenario types so that the
@@ -21,19 +20,6 @@ Subtypes:
   - TRAFFIC  allow/deny  → port-scan / drop-burst rules
   - THREAT   IPS/AV/WildFire
   - URL      URL filtering blocks
-=======
-Palo Alto Networks log generator (PAN-OS 10.x syslog, ~70 fields per record).
-
-Subtypes produced:
-  - TRAFFIC : connection allow/deny -> port-scan, drop-burst rules
-  - THREAT  : IPS/AV/WildFire hits   -> critical / high severity rules
-  - URL     : URL filtering blocks   -> malicious-category rules
-
-NEW: same scenario attacker IPs from shared_state appear as the SOURCE of
-THREAT signatures (port scans, exploit attempts, C2 callbacks). The scenario
-victim hosts appear as the DESTINATION. Pivot in Wazuh on the attacker IP
-and you'll see the firewall threats alongside SSH/AD/MSSQL events.
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 """
 import random
 from pathlib import Path
@@ -41,11 +27,7 @@ from datetime import timedelta
 from .common import (
     INTERNAL_IPS, EXTERNAL_IPS, ATTACKER_IPS, SERVER_IPS,
     pick_normal_user, pick_noisy_user, USERNAMES, HOSTS_BANKING,
-<<<<<<< HEAD
     rand_recent, palo_ts, syslog_ts, pick,
-=======
-    rand_recent, palo_ts, pick,
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 )
 from .shared_state import INCIDENTS
 
@@ -53,7 +35,6 @@ from .shared_state import INCIDENTS
 SERIAL = "012345678901"
 DEVICE = "PA-VM-FW01"
 
-<<<<<<< HEAD
 # Catalog grouped by attack archetype so we can pick by scenario type.
 THREAT_SIGS_WEB = [
     ("SQL Injection Evasion Attempt",            "40021", "critical", "vulnerability"),
@@ -62,31 +43,6 @@ THREAT_SIGS_WEB = [
     ("Web Shell Detected",                       "86010", "critical", "virus"),
     ("Log4Shell CVE-2021-44228",                 "91991", "critical", "vulnerability"),
     ("Brute Force HTTP Basic Authentication",    "40015", "medium",   "vulnerability"),
-=======
-
-# Expanded threat signature catalog — enough variety that the AI doesn't
-# learn "all threats look the same"
-THREAT_SIGS = [
-    # (name, signature_id, severity, subtype)
-    ("SQL Injection Evasion Attempt",            "40021", "critical", "vulnerability"),
-    ("Suspicious DNS Query - DGA",               "12345", "high",     "spyware"),
-    ("DNS Tunneling Detected",                   "12346", "high",     "spyware"),
-    ("Cobalt Strike Beacon",                     "86001", "critical", "spyware"),
-    ("Mimikatz Credential Dumper",               "86002", "critical", "virus"),
-    ("ZeroLogon CVE-2020-1472",                  "57777", "critical", "vulnerability"),
-    ("Log4Shell CVE-2021-44228",                 "91991", "critical", "vulnerability"),
-    ("EternalBlue SMB Exploit",                  "39001", "high",     "vulnerability"),
-    ("Brute Force HTTP Basic Authentication",    "40015", "medium",   "vulnerability"),
-    ("PowerShell Empire C2",                     "86003", "critical", "spyware"),
-    ("Metasploit Reverse Shell",                 "86004", "critical", "spyware"),
-    ("Ransomware Activity Detected",             "86005", "critical", "wildfire-virus"),
-    ("Suspicious Outbound to TOR",               "30001", "medium",   "spyware"),
-    ("ProxyShell Exchange Exploit",              "91002", "critical", "vulnerability"),
-    ("Apache Struts RCE CVE-2017-5638",          "31001", "critical", "vulnerability"),
-    ("Suspicious File Upload to External",       "40050", "high",     "vulnerability"),
-    ("SWIFT Anomalous Traffic Pattern",          "40090", "high",     "vulnerability"),
-    ("Web Shell Detected",                       "86010", "critical", "virus"),
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 ]
 THREAT_SIGS_CRED = [
     ("Mimikatz Credential Dumper",               "86002", "critical", "virus"),
@@ -112,12 +68,7 @@ THREAT_SIGS_ALL = (THREAT_SIGS_WEB + THREAT_SIGS_CRED +
 
 URL_CATEGORIES_BAD = [
     "malware", "command-and-control", "phishing", "newly-registered-domain",
-<<<<<<< HEAD
     "cryptocurrency", "hacking", "proxy-avoidance-and-anonymizers", "dynamic-dns",
-=======
-    "cryptocurrency", "hacking", "proxy-avoidance-and-anonymizers",
-    "dynamic-dns",
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 ]
 URL_CATEGORIES_OK = [
     "business-and-economy", "computer-and-internet-info", "news",
@@ -135,7 +86,6 @@ URL_HOSTS_OK = [
 
 
 # =========================================================================
-<<<<<<< HEAD
 # Low-level builders
 # =========================================================================
 def _syslog_wrap(ts, csv_payload):
@@ -145,24 +95,13 @@ def _syslog_wrap(ts, csv_payload):
 
 def _traffic_csv(ts, src_ip=None, dst_ip=None, action="allow", attacker=False,
                  dport=None, app=None):
-=======
-# Line builders — PAN-OS field ordering matters for the Wazuh decoder
-# =========================================================================
-def _traffic(ts, src_ip=None, dst_ip=None, action="allow", attacker=False):
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     src = src_ip or (pick(ATTACKER_IPS) if attacker else pick(INTERNAL_IPS))
     dst = dst_ip or (pick(INTERNAL_IPS) if attacker
                      else pick(INTERNAL_IPS + EXTERNAL_IPS))
     sport = random.randint(49152, 65535)
-<<<<<<< HEAD
     dport = dport or pick([22, 80, 443, 445, 3389, 3306, 1433, 8080, 8443, 53])
     app = app or pick(["web-browsing", "ssl", "ssh", "ms-sql-db", "mysql",
                        "ms-ds-smb", "dns", "swift-protocol", "ldap"])
-=======
-    dport = pick([22, 80, 443, 445, 3389, 3306, 1433, 8080, 8443, 53])
-    app = pick(["web-browsing", "ssl", "ssh", "ms-sql-db", "mysql",
-                "ms-ds-smb", "dns", "swift-protocol", "ldap"])
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     rule_name = "Allow-Internal" if action == "allow" else "Block-Suspicious"
     bytes_sent = random.randint(100, 50000)
     bytes_recv = random.randint(100, 500000)
@@ -187,7 +126,6 @@ def _traffic(ts, src_ip=None, dst_ip=None, action="allow", attacker=False):
     return ",".join(fields)
 
 
-<<<<<<< HEAD
 def _threat_csv(ts, src_ip=None, dst_ip=None, sig=None, src_user=None,
                 dport=None):
     src = src_ip or pick(ATTACKER_IPS + EXTERNAL_IPS)
@@ -196,15 +134,6 @@ def _threat_csv(ts, src_ip=None, dst_ip=None, sig=None, src_user=None,
     src_user = src_user or ""
     sport = random.randint(49152, 65535)
     dport = dport or pick([80, 443, 445, 3389, 22, 53])
-=======
-def _threat(ts, src_ip=None, dst_ip=None, sig=None, src_user=None):
-    src = src_ip or pick(ATTACKER_IPS + EXTERNAL_IPS)
-    dst = dst_ip or pick(INTERNAL_IPS)
-    name, sid, sev, subtype = sig or pick(THREAT_SIGS)
-    src_user = src_user or ""
-    sport = random.randint(49152, 65535)
-    dport = pick([80, 443, 445, 3389, 22, 53])
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 
     miscellaneous = f'"http://malicious.example/{sid}"'
     threat_name_quoted = f'"{name}({sid})"'
@@ -229,7 +158,6 @@ def _threat(ts, src_ip=None, dst_ip=None, sig=None, src_user=None):
     return ",".join(fields)
 
 
-<<<<<<< HEAD
 def _url_csv(ts, src_ip=None, dst_ip=None, blocked=False, src_user=None,
              host=None, category=None):
     src = src_ip or pick(INTERNAL_IPS)
@@ -240,16 +168,6 @@ def _url_csv(ts, src_ip=None, dst_ip=None, blocked=False, src_user=None,
     action = "block-url" if blocked else "alert"
     severity = "high" if blocked else "informational"
     host = host or (pick(URL_HOSTS_BAD) if blocked else pick(URL_HOSTS_OK))
-=======
-def _url(ts, src_ip=None, blocked=False, src_user=None):
-    src = src_ip or pick(INTERNAL_IPS)
-    dst = pick(EXTERNAL_IPS)
-    src_user = src_user or ""
-    cat = pick(URL_CATEGORIES_BAD) if blocked else pick(URL_CATEGORIES_OK)
-    action = "block-url" if blocked else "alert"
-    severity = "high" if blocked else "informational"
-    host = pick(URL_HOSTS_BAD) if blocked else pick(URL_HOSTS_OK)
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     uri = pick(["/", "/login", "/wp-admin", "/api/v1/data", "/download/x.exe",
                 "/admin", "/upload"])
 
@@ -273,7 +191,6 @@ def _url(ts, src_ip=None, blocked=False, src_user=None):
     return ",".join(fields)
 
 
-<<<<<<< HEAD
 def _traffic(ts, **kw):
     return _syslog_wrap(ts, _traffic_csv(ts, **kw))
 
@@ -457,42 +374,22 @@ def _dispatch_scenario(incident, events):
 
 # =========================================================================
 # Main
-=======
-def _dns_tunneling(ts, src_ip, src_user=""):
-    """High-frequency, high-entropy DNS queries — classic tunneling pattern."""
-    sig = ("DNS Tunneling Detected", "12346", "high", "spyware")
-    return _threat(ts, src_ip=src_ip, dst_ip=pick(INTERNAL_IPS),
-                   sig=sig, src_user=src_user)
-
-
-# =========================================================================
-# Main generator
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
 # =========================================================================
 def generate(path: Path, count: int = 40) -> None:
     events = []
 
-<<<<<<< HEAD
     # ----------------------------------------------------------------
     # Baseline traffic
     # ----------------------------------------------------------------
-=======
-    # --- Baseline normal allow traffic --------------------------------
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     for _ in range(count * 2):
         ts = rand_recent(60)
         events.append((ts, _traffic(ts, action="allow")))
 
-<<<<<<< HEAD
-=======
-    # --- Normal URL browsing -----------------------------------------
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     for _ in range(15):
         ts = rand_recent(60)
         events.append((ts, _url(ts, blocked=False)))
 
     # ----------------------------------------------------------------
-<<<<<<< HEAD
     # CORRELATED chains — per-incident, mirror EDR scenario type
     # ----------------------------------------------------------------
     chain_types = []
@@ -506,75 +403,15 @@ def generate(path: Path, count: int = 40) -> None:
     # Standalone (uncorrelated) noise
     # ----------------------------------------------------------------
     # Random threat events (mix of severities)
-=======
-    # SCENARIO-DRIVEN: threats from each incident's attacker IP
-    # ----------------------------------------------------------------
-    for incident in INCIDENTS:
-        attacker_ip = incident["attacker_ip"]
-        victim_user = incident["victim_user"]
-        victim_host = incident["victim_host"]
-        # Use a server-VLAN IP as the destination so it's clearly an "inside" hit
-        dst_ip = pick(SERVER_IPS)
-
-        # Port scan: 20 denied TRAFFIC entries from the attacker to varied dst ports
-        base = rand_recent(25)
-        for i in range(20):
-            ts = base + timedelta(seconds=i)
-            line = _traffic(ts, src_ip=attacker_ip, dst_ip=dst_ip,
-                            action="deny", attacker=True)
-            # Override dst port for the scan illusion
-            parts = line.split(",")
-            parts[25] = str(random.randint(1, 65535))
-            events.append((ts, ",".join(parts)))
-
-        # Exploit attempt: a critical THREAT signature from attacker to victim
-        ts = base + timedelta(seconds=30)
-        sig = pick([s for s in THREAT_SIGS if s[2] == "critical"])
-        events.append((ts, _threat(ts, src_ip=attacker_ip, dst_ip=dst_ip,
-                                   sig=sig, src_user="")))
-
-        # Second-stage: web shell or beacon
-        ts = base + timedelta(seconds=60)
-        sig = pick([("Cobalt Strike Beacon", "86001", "critical", "spyware"),
-                    ("Web Shell Detected",   "86010", "critical", "virus")])
-        events.append((ts, _threat(ts, src_ip=dst_ip, dst_ip=attacker_ip,
-                                   sig=sig, src_user=victim_user)))
-
-        # C2 callback (outbound URL block) by compromised host
-        ts = base + timedelta(seconds=90)
-        events.append((ts, _url(ts, src_ip=dst_ip, blocked=True,
-                                src_user=victim_user)))
-
-        # DNS tunneling from victim host (data exfil via DNS)
-        for i in range(5):
-            ts = base + timedelta(seconds=120 + i * 3)
-            events.append((ts, _dns_tunneling(ts, src_ip=dst_ip,
-                                              src_user=victim_user)))
-
-        # Outbound suspicious file upload (exfil)
-        ts = base + timedelta(seconds=180)
-        sig = ("Suspicious File Upload to External", "40050", "high", "vulnerability")
-        events.append((ts, _threat(ts, src_ip=dst_ip, dst_ip=attacker_ip,
-                                   sig=sig, src_user=victim_user)))
-
-    # ----------------------------------------------------------------
-    # STANDALONE: assorted critical/high threats (rule coverage)
-    # ----------------------------------------------------------------
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     for _ in range(20):
         ts = rand_recent(30)
         events.append((ts, _threat(ts)))
 
-<<<<<<< HEAD
     # URL blocks (random users hitting bad categories)
-=======
-    # Random URL filtering blocks
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     for _ in range(15):
         ts = rand_recent(30)
         events.append((ts, _url(ts, blocked=True)))
 
-<<<<<<< HEAD
     # Brute-force HTTP auth on internet-exposed apps
     for _ in range(6):
         ts = rand_recent(45)
@@ -589,19 +426,12 @@ def generate(path: Path, count: int = 40) -> None:
         events.append((ts, _threat(ts, src_ip=pick(INTERNAL_IPS), sig=tor_sig)))
 
     # Sort + write
-=======
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
     events.sort(key=lambda x: x[0])
     with path.open("w", encoding="utf-8") as f:
         for _, line in events:
             f.write(line + "\n")
 
     print(f"  wrote {len(events)} Palo Alto events -> {path.name}")
-<<<<<<< HEAD
     print(f"  correlated chains ({len(INCIDENTS)}):")
     for ct in chain_types:
         print(f"    {ct}")
-=======
-    print(f"  scenario-driven Palo Alto chains: {len(INCIDENTS)} "
-          f"(attackers: {[i['attacker_ip'] for i in INCIDENTS]})")
->>>>>>> d68c8a668708ebedb9c21ffe916cb3b47f909f47
