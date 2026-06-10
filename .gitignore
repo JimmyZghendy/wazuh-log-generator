@@ -1,1 +1,6 @@
+# Generated logs – never commit
 output/
+
+# Python cache
+__pycache__/
+*.pyc
